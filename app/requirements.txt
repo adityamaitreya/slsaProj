@@ -1,0 +1,17 @@
+# Flask application dependencies for SLSA Demo App
+# These dependencies will appear in the SBOM (Software Bill of Materials)
+
+# Core web framework
+Flask==3.0.0
+
+# Production WSGI server
+gunicorn==21.2.0
+
+# Security and utilities
+Werkzeug==3.0.1
+
+# Development and testing dependencies (commented out for production)
+# pytest==7.4.3
+# pytest-flask==1.3.0
+# black==23.11.0
+# flake8==6.1.0

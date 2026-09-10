@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Auto Format Python",
+      "trigger": "PostFileSave",
+      "description": "Automatically format Python files with black and isort on save",
+      "matcher": "\\.py$",
+      "action": {
+        "type": "command",
+        "command": "black $FILE_PATH && isort $FILE_PATH"
+      }
+    }
+  ]
+}
