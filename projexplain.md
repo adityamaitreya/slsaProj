@@ -384,43 +384,199 @@ projX/
 | A2 | Dockerization | ✅ Complete |
 | A3 | GitHub Actions CI/CD | ✅ Complete |
 | A4 | SBOM Generation | ✅ Complete |
-| A5 | SLSA Provenance | ⏳ Next |
-| A6 | Cosign Signing | ⏳ Pending |
-| A7 | Common Storage Interface | ⏳ Pending |
+| A5 | SLSA Provenance | ✅ Complete |
+| A6 | Cosign Signing | ✅ Complete |
+| A7 | Common Storage Interface | ⏳ Next |
 | A8 | PostgreSQL Backend | ⏳ Pending |
 | A9 | Verification Engine & API | ⏳ Pending |
 | A10 | React Dashboard | ⏳ Pending |
 | A11 | Functional Testing Suite | ⏳ Pending |
 
-**Overall: 4/20 stages complete (20%)**
+**Overall: 6/20 stages complete (30%)**
+
+---
+
+### Stage A5 — SLSA Provenance Generation
+
+**What it is:**
+SLSA provenance is a cryptographic build receipt — a document that permanently records how, when, where, and from what source the software was built.
+
+SLSA stands for **Supply-chain Levels for Software Artifacts** (pronounced "salsa"). It is an open framework created by Google and used by GitHub, npm, and many others.
+
+**Why we built it:**
+Anyone can claim "I built this from this source code." SLSA provenance makes that claim unforgeable. The provenance document is signed, attached to the image in the registry, and verifiable by anyone with the right tools.
+
+**What it proves:**
+
+| Question | Answer recorded in provenance |
+|---|---|
+| Who built it? | GitHub Actions (the exact workflow) |
+| When? | Exact UTC timestamp |
+| From which code? | Exact repository URL + commit SHA |
+| How? | Exact workflow file and steps used |
+| What was the result? | SHA-256 digest of the Docker image |
+
+**How it works in our pipeline:**
+
+The official SLSA generator runs as a **separate job** after the image is built and pushed. This separation is intentional — the generator needs the finished image digest as its input, and running it in a separate job keeps the trust boundary clean.
+
+```yaml
+# Job 2 in build.yml — runs after Job 1 finishes
+slsa-provenance:
+  uses: slsa-framework/slsa-github-generator/...@v2.0.0
+  with:
+    image: ghcr.io/adityamaitreya/slsaProj
+    digest: sha256:abc123...   # output of Job 1
+```
+
+The generator:
+1. Reads the GitHub Actions context (repo, commit, workflow, timestamp)
+2. Builds a provenance document in SLSA v1.0 format
+3. Signs it using GitHub's OIDC token
+4. Pushes it as a signed OCI attestation attached to the image in GHCR
+
+**What "attached to the image" means:**
+
+The provenance is not a separate file you download. It is stored inside the same container registry, linked to the image by its digest. Think of it as a tamper-evident label fused to the jar — you cannot remove or replace it without breaking the seal.
+
+**What the provenance document looks like (simplified):**
+
+```json
+{
+  "buildType": "https://slsa.dev/container-based-build/v0.1",
+  "builder": {
+    "id": "https://github.com/slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0"
+  },
+  "invocation": {
+    "configSource": {
+      "uri": "git+https://github.com/adityamaitreya/slsaProj@refs/heads/main",
+      "digest": { "sha1": "abc123..." },
+      "entryPoint": ".github/workflows/build.yml"
+    }
+  },
+  "subject": [{
+    "name": "ghcr.io/adityamaitreya/slsaproj",
+    "digest": { "sha256": "5fbc20ebcfdd..." }
+  }]
+}
+```
+
+**Files changed:**
+- `.github/workflows/build.yml` — added `slsa-provenance` job (Job 2)
+
+---
+
+### Stage A6 — Cosign Signing
+
+**What it is:**
+Cosign is a tool by Sigstore (part of the Linux Foundation) that digitally signs Docker images and attestations. Our pipeline uses **keyless signing**, which means we never create or manage a private key ourselves.
+
+**Why keyless signing?**
+Traditional signing requires you to:
+1. Generate a private key
+2. Keep it safe forever
+3. Rotate it periodically
+4. Handle key leaks
+
+Keyless signing removes all of that. Instead, GitHub's OIDC (OpenID Connect) token proves identity in the moment. The certificate is short-lived (10 minutes). Nobody needs to manage keys.
+
+**How keyless signing works step by step:**
+
+```
+GitHub Actions run starts
+        ↓
+GitHub issues a short-lived OIDC token
+(proves: "this is GitHub Actions, repo X, workflow Y")
+        ↓
+Cosign exchanges that token with Sigstore's Fulcio CA
+        ↓
+Fulcio issues a short-lived signing certificate
+(certificate contains: repo URL, workflow path, SHA)
+        ↓
+Cosign signs the image digest with that certificate
+        ↓
+Signature pushed to GHCR alongside the image
+        ↓
+Signature + certificate recorded in Rekor
+(Rekor = public, append-only transparency log — like a blockchain)
+        ↓
+Certificate expires (10 min) — but the log entry is permanent
+```
+
+**What Rekor is:**
+Rekor is a public transparency log run by Sigstore. Every signature we create is recorded there permanently. Anyone in the world can look up our signatures and verify they are authentic. It is similar to how Certificate Transparency logs work for TLS certificates.
+
+**Three signing operations in our pipeline:**
+
+| Operation | Command | What it does |
+|---|---|---|
+| Sign image | `cosign sign` | Signs the Docker image digest |
+| Attest SBOM | `cosign attest --type cyclonedx` | Attaches the signed SBOM to the image |
+| Attest provenance | Done by SLSA generator | Attaches signed SLSA provenance to image |
+
+**How to verify our image (anyone can do this):**
+
+```bash
+cosign verify ghcr.io/adityamaitreya/slsaproj@sha256:... \
+  --certificate-identity-regexp="https://github.com/adityamaitreya/slsaProj" \
+  --certificate-oidc-issuer="https://token.actions.githubusercontent.com"
+```
+
+If this command succeeds, it proves:
+- The image was signed inside a GitHub Actions run
+- That run was for the `adityamaitreya/slsaProj` repository
+- The signature is recorded in Rekor and has not been tampered with
+
+If the image was modified after signing, this command will fail.
+
+**Files changed:**
+- `.github/workflows/build.yml` — added `cosign-installer` step, `cosign sign` step, `cosign attest` step in Job 1
+
+---
+
+## How A5 and A6 Fit Together
+
+```
+Docker Image Built
+        ↓
+SHA-256 Digest: sha256:abc123...
+        ↓
+        ├── cosign sign ──────────────────► Signature in GHCR + Rekor
+        │                                   (proves image is authentic)
+        │
+        ├── cosign attest (SBOM) ─────────► SBOM attestation in GHCR
+        │                                   (proves ingredients list is authentic)
+        │
+        └── SLSA generator ───────────────► Provenance attestation in GHCR
+                                            (proves who/when/where/how it was built)
+```
+
+All three are attached to the same image digest. They cannot be separated or swapped without breaking the cryptographic links.
+
+**The complete supply chain evidence package for each build:**
+
+| Evidence | What it proves | Where stored |
+|---|---|---|
+| Docker image digest | Identity of the artifact | GHCR |
+| Cosign signature | Image is authentic, not tampered | GHCR + Rekor |
+| SBOM attestation | Dependency list is authentic | GHCR |
+| SLSA provenance | Build origin and process | GHCR |
 
 ---
 
 ## What Comes Next
 
-### Stage A5 — SLSA Provenance
+### Stage A7 — Common Storage Interface
 
-SLSA provenance is a cryptographic build receipt. It proves:
-- **Who** built it → GitHub Actions
-- **When** → exact timestamp
-- **From what source** → exact repo + commit SHA
-- **How** → exact workflow steps
-- **What the result is** → SHA-256 digest
+This is where we start building the research comparison. We will create a Python abstraction layer — a "socket" that two different backends (PostgreSQL and Blockchain+IPFS) can plug into. The verification logic will talk only to this interface, never directly to either backend. This ensures the research comparison is fair.
 
-It is signed with a key so that nobody can forge or modify it after the fact.
+### Stages A8–A9 — Storage and Verification
 
-### Stage A6 — Cosign Signing
-
-Cosign digitally signs the Docker image and the provenance. If anyone tampers with either after signing, the signature verification will fail.
-
-### Stages A7–A9 — Storage and Verification
-
-This is where we build the actual comparison at the heart of the research:
-- **System A (PostgreSQL):** Store provenance in a regular database
-- **System B (Blockchain + IPFS):** Store provenance in a decentralized system
+- **Stage A8 (PostgreSQL):** Store the full provenance package in a relational database with a REST API
+- **Stage A9 (Verification API):** A FastAPI service that takes an artifact digest, retrieves its evidence package, runs all checks, and returns VALID / TAMPERED / INVALID
 - **Verification API:** Same code, same logic, pluggable backend
 
 ---
 
-*Last updated after Stage A4 completion*
+*Last updated after Stage A6 completion*
 *Repository: https://github.com/adityamaitreya/slsaProj*
