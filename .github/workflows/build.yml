@@ -249,7 +249,8 @@ jobs:
       packages: write    # to push attestation to GHCR
 
     # Must use a pinned version of the official SLSA generator
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
+    # Using v1.10.0 — stable, widely tested release
+    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.10.0
     with:
       image: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
       digest: ${{ needs.build-sign-attest.outputs.image-digest }}
