@@ -1,0 +1,14 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Remind to Update projexplain.md",
+      "trigger": "PostTaskExec",
+      "description": "After each spec task completes, updates projexplain.md with explanation of what was just built",
+      "action": {
+        "type": "agent",
+        "prompt": "A development task just completed. Check projexplain.md at /home/byte/Desktop/projX/projexplain.md and update it if any new stages were completed in this session. Add a new section under \"Stages Completed\" for any newly finished stage, explain what was built in plain beginner-friendly English, update the Progress table, and update the \"Last updated\" line at the bottom. Only add content for stages that are actually done — do not add placeholders."
+      }
+    }
+  ]
+}
