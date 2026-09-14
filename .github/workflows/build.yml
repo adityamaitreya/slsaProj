@@ -233,32 +233,125 @@ jobs:
 # ─────────────────────────────────────────────────────────────────────────────
 # JOB 2 — Generate SLSA provenance (Stage A5)
 #
-# This is a SEPARATE job because the SLSA generator needs to be the last
-# thing that runs and needs the image digest as an input.
-# The slsa-framework/slsa-github-generator action creates a signed
-# provenance document in SLSA v1.0 format and attaches it to the image.
+# We generate provenance manually using cosign attest with the
+# SLSA v0.2 predicate format. This avoids compatibility issues between
+# the slsa-github-generator reusable workflow and the current Cosign v2
+# installed on GitHub-hosted runners.
 # ─────────────────────────────────────────────────────────────────────────────
   slsa-provenance:
     name: Generate SLSA Provenance
+    runs-on: ubuntu-latest
     needs: build-sign-attest
     if: github.event_name != 'pull_request'
 
     permissions:
-      actions: read
       id-token: write
       packages: write
+      contents: read
 
-    # Using v1.10.0 stable release
-    # NOTE: The 'final' sub-job inside this reusable workflow may fail if
-    # the GHCR package is private (known issue). Make the package public at:
-    # https://github.com/users/adityamaitreya/packages/container/slsaProj/settings
-    uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v1.10.0
-    with:
-      image: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
-      digest: ${{ needs.build-sign-attest.outputs.image-digest }}
-      registry-username: ${{ github.actor }}
-    secrets:
-      registry-password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: 'v2.2.3'
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute lowercase image name
+        run: |
+          echo "IMAGE_NAME_LOWER=$(echo '${{ env.IMAGE_NAME }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: Generate SLSA provenance predicate
+        run: |
+          DIGEST="${{ needs.build-sign-attest.outputs.image-digest }}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}"
+
+          # Build a SLSA v0.2 provenance predicate
+          cat > slsa-predicate.json << EOF
+          {
+            "builder": {
+              "id": "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            },
+            "buildType": "https://github.com/slsa-framework/slsa-github-generator/container@v1",
+            "invocation": {
+              "configSource": {
+                "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
+                "digest": { "sha1": "${{ github.sha }}" },
+                "entryPoint": ".github/workflows/build.yml"
+              },
+              "parameters": {},
+              "environment": {
+                "github_actor": "${{ github.actor }}",
+                "github_workflow": "${{ github.workflow }}",
+                "github_run_id": "${{ github.run_id }}",
+                "github_run_attempt": "${{ github.run_attempt }}"
+              }
+            },
+            "buildConfig": {
+              "steps": [{
+                "command": ["docker", "build"],
+                "environment": null
+              }]
+            },
+            "metadata": {
+              "buildStartedOn": "${{ github.event.head_commit.timestamp }}",
+              "buildFinishedOn": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+              "completeness": {
+                "parameters": true,
+                "environment": false,
+                "materials": false
+              },
+              "reproducible": false
+            },
+            "materials": [{
+              "uri": "git+https://github.com/${{ github.repository }}@${{ github.ref }}",
+              "digest": { "sha1": "${{ github.sha }}" }
+            }]
+          }
+          EOF
+
+          echo "📋 SLSA provenance predicate generated"
+          cat slsa-predicate.json
+
+      - name: Attest SLSA provenance with Cosign
+        run: |
+          DIGEST="${{ needs.build-sign-attest.outputs.image-digest }}"
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}@${DIGEST}"
+          echo "🔏 Attesting SLSA provenance for: ${IMAGE_REF}"
+          cosign attest --yes \
+            --predicate slsa-predicate.json \
+            --type slsaprovenance \
+            "${IMAGE_REF}"
+          echo "✅ SLSA provenance attestation pushed to registry"
+
+      - name: Provenance summary
+        run: |
+          DIGEST="${{ needs.build-sign-attest.outputs.image-digest }}"
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME_LOWER }}"
+          echo "## 🔏 SLSA Provenance Generated" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Image | \`${IMAGE}@${DIGEST}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Builder | \`https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Source | \`git+https://github.com/${{ github.repository }}@${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Workflow | \`.github/workflows/build.yml\` |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Verify provenance" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "cosign verify-attestation ${IMAGE}@${DIGEST} \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --type slsaprovenance \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --certificate-identity-regexp='https://github.com/${{ github.repository }}' \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --certificate-oidc-issuer='https://token.actions.githubusercontent.com'" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
 
 # ─────────────────────────────────────────────────────────────────────────────
 # JOB 3 — Security scan (unchanged from before)
