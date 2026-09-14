@@ -131,11 +131,8 @@ jobs:
       #
       - name: Sign image with Cosign
         if: github.event_name != 'pull_request'
-        env:
-          DIGEST: ${{ steps.build-and-push.outputs.digest }}
-          TAGS:   ${{ steps.meta.outputs.tags }}
         run: |
-          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${DIGEST}"
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build-and-push.outputs.digest }}"
           echo "🔏 Signing image: ${IMAGE_REF}"
           cosign sign --yes "${IMAGE_REF}"
           echo "✅ Image signed and recorded in Rekor transparency log"
@@ -245,7 +242,7 @@ jobs:
     # Must use a pinned version of the official SLSA generator
     uses: slsa-framework/slsa-github-generator/.github/workflows/generator_container_slsa3.yml@v2.0.0
     with:
-      image: ghcr.io/${{ github.repository }}
+      image: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
       digest: ${{ needs.build-sign-attest.outputs.image-digest }}
       registry-username: ${{ github.actor }}
     secrets:
