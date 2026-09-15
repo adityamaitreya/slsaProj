@@ -386,13 +386,13 @@ projX/
 | A4 | SBOM Generation | ✅ Complete |
 | A5 | SLSA Provenance | ✅ Complete |
 | A6 | Cosign Signing | ✅ Complete |
-| A7 | Common Storage Interface | ⏳ Next |
-| A8 | PostgreSQL Backend | ⏳ Pending |
-| A9 | Verification Engine & API | ⏳ Pending |
+| A7 | Common Storage Interface | ✅ Complete |
+| A8 | PostgreSQL Backend | ✅ Complete |
+| A9 | Verification Engine & API | ⏳ Next |
 | A10 | React Dashboard | ⏳ Pending |
 | A11 | Functional Testing Suite | ⏳ Pending |
 
-**Overall: 6/20 stages complete (30%)**
+**Overall: 8/20 stages complete (40%)**
 
 ---
 
@@ -564,19 +564,149 @@ All three are attached to the same image digest. They cannot be separated or swa
 
 ---
 
-## What Comes Next
+---
 
 ### Stage A7 — Common Storage Interface
 
-This is where we start building the research comparison. We will create a Python abstraction layer — a "socket" that two different backends (PostgreSQL and Blockchain+IPFS) can plug into. The verification logic will talk only to this interface, never directly to either backend. This ensures the research comparison is fair.
+**What it is:**
+A Python abstraction layer that sits between the verification logic and the actual storage backends. It defines a contract — a set of methods that both PostgreSQL and Blockchain+IPFS must implement.
 
-### Stages A8–A9 — Storage and Verification
+**Why we built it:**
+This is the most important architectural piece of the research. Without it, the verification code would be tightly coupled to PostgreSQL, and swapping in the blockchain backend later would require rewriting everything.
 
-- **Stage A8 (PostgreSQL):** Store the full provenance package in a relational database with a REST API
-- **Stage A9 (Verification API):** A FastAPI service that takes an artifact digest, retrieves its evidence package, runs all checks, and returns VALID / TAMPERED / INVALID
+With the interface in place:
+
+```
+Same verification code
+        ↓
+  ProvenanceStore (interface)
+    /                \
+PostgreSQLStore    BlockchainIPFSStore
+    ↓                     ↓
+System B (done)      System A (Phase B)
+```
+
+When we benchmark both systems in Phase C, any performance difference is **purely the storage backend**. The verification logic is identical. That is what makes the research scientifically valid.
+
+**Four methods every backend must implement:**
+
+| Method | What it does |
+|---|---|
+| `store(record)` | Save a provenance package |
+| `retrieve(digest)` | Fetch by artifact SHA-256 fingerprint |
+| `verify_integrity(digest)` | Recompute hash and compare — tamper detection |
+| `health_check()` | Is the backend reachable? |
+
+**Shared utility built into the interface:**
+
+```python
+# Compute a deterministic SHA-256 of the provenance JSON
+ProvenanceStore.compute_provenance_hash(provenance_json)
+
+# When you store a record, this hash is saved alongside it.
+# When you verify, the hash is recomputed and compared.
+# If anything changed in the database → hashes don't match → TAMPERED.
+```
+
+**Files created:**
+
+| File | Purpose |
+|---|---|
+| `backend/models/provenance.py` | Data shapes: ProvenanceRecord, StoreResult, VerificationResult |
+| `backend/storage/base.py` | Abstract interface + custom exceptions |
+| `backend/storage/postgres_store.py` | PostgreSQL implementation |
+| `backend/storage/blockchain_store.py` | Blockchain stub (Phase B) |
+| `backend/tests/test_storage.py` | 17 tests — all passing |
+
+**Key test — tamper detection:**
+The most important test directly modifies the database row (bypassing the API) and then calls `verify_integrity()`. The system detects it and returns `TAMPERED`. This proves the hash-based tamper detection works even against direct database attacks.
+
+---
+
+### Stage A8 — PostgreSQL Backend
+
+**What it is:**
+A real PostgreSQL database running in Docker, with a FastAPI REST API on top of it. This is **System B (Centralized)** in the research comparison.
+
+**Why we built it:**
+The interface from A7 needs a real backend to prove it works. PostgreSQL is the simpler of the two backends, so we build it first. It also gives us a working system to benchmark against when the Blockchain+IPFS backend is ready.
+
+**How it works:**
+
+```
+HTTP Request
+     ↓
+FastAPI (main.py)
+     ↓
+ProvenanceStore interface
+     ↓
+PostgreSQLStore
+     ↓
+PostgreSQL 14 (Docker container)
+```
+
+**The five endpoints:**
+
+| Endpoint | What it does | Example response |
+|---|---|---|
+| `GET /` | API info and endpoint list | 200 JSON |
+| `GET /health` | Is the database alive? | `{"database_connected": true}` |
+| `POST /provenance` | Store a provenance record | `{"success": true, "backend": "postgresql"}` |
+| `GET /provenance/{digest}` | Retrieve by artifact digest | Full ProvenanceRecord |
+| `POST /verify/{digest}` | Check integrity | `{"status": "VALID"}` |
+
+**What VALID, TAMPERED, NOT_FOUND mean:**
+
+- `VALID` — record found, hash matches, nobody touched it
+- `TAMPERED` — record found, but hash does not match — something changed
+- `NOT_FOUND` — no record exists for this digest
+
+**What we tested and confirmed:**
+
+```
+POST /provenance with wrong hash  → 500 rejected  ✅ (tamper at input)
+POST /provenance with correct hash → 201 Created   ✅
+GET  /provenance/{digest}          → 200 full record ✅
+POST /verify/{digest}              → VALID          ✅
+GET  /provenance/sha256:doesnotexist → 404          ✅
+```
+
+**Files created:**
+
+| File | Purpose |
+|---|---|
+| `backend/docker-compose.yml` | PostgreSQL 14 container setup |
+| `backend/.env` | Database connection string |
+| `backend/main.py` | FastAPI application with all 5 endpoints |
+
+**Important detail — CORS middleware:**
+The FastAPI app has CORS (Cross-Origin Resource Sharing) enabled for `localhost:3000` and `localhost:5173`. This means the React dashboard (Stage A10) can call this API from the browser without being blocked.
+
+---
+
+## What Comes Next
+
+### Stage A9 — Verification Engine & API
+
+This builds the core verification logic that runs ALL checks on an artifact:
+
+```
+Artifact digest
+     ↓
+1. Fetch provenance from store
+2. Verify Cosign signature
+3. Validate SLSA provenance format
+4. Check source repository matches
+5. Check builder identity matches
+6. Check provenance hash integrity
+     ↓
+VALID / TAMPERED / INVALID
+```
+
+This is different from the simple hash check we have now. Stage A9 adds cryptographic signature verification and full SLSA provenance validation.
 - **Verification API:** Same code, same logic, pluggable backend
 
 ---
 
-*Last updated after Stage A6 completion*
+*Last updated after Stage A8 completion*
 *Repository: https://github.com/adityamaitreya/slsaProj*
