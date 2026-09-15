@@ -1,4 +1,4 @@
-1name: Build, Sign, and Attest
+name: Build, Sign, and Attest
 
 # Stages covered by this workflow:
 #   A3 - CI/CD pipeline (build + push)
