@@ -1,0 +1,26 @@
+version: '3.8'
+
+# This starts PostgreSQL for our backend
+# Run with: sudo docker compose up -d
+# Stop with: sudo docker compose down
+
+services:
+  postgres:
+    image: postgres:14-alpine
+    container_name: slsa-postgres
+    environment:
+      POSTGRES_DB: slsa_db
+      POSTGRES_USER: slsa_user
+      POSTGRES_PASSWORD: slsa_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U slsa_user -d slsa_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
